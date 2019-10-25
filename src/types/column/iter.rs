@@ -1,17 +1,13 @@
 #![allow(clippy::cast_ptr_alignment)]
 
-use std::{
-    intrinsics::{exact_div, unchecked_sub},
-    iter::{FusedIterator, TrustedLen},
-    marker, mem, ptr, slice,
-};
+use std::{iter::FusedIterator, marker, mem, ptr, slice};
 
 use chrono::{prelude::*, Date};
 use chrono_tz::Tz;
 
 use crate::{
     errors::{Error, FromSqlError, Result},
-    types::{column::StringPool, decimal::NoBits, Column, Decimal, SqlType, Simple},
+    types::{column::StringPool, decimal::NoBits, Column, Decimal, Simple, SqlType},
 };
 
 macro_rules! simple_num_iterable {
@@ -105,15 +101,7 @@ macro_rules! exact_size_iterator {
         impl ExactSizeIterator for $name<'_> {
             #[inline(always)]
             fn len(&self) -> usize {
-                let start = self.ptr;
-                let size = mem::size_of::<$type>();
-                let diff = unsafe { unchecked_sub(self.end as usize, start as usize) };
-                unsafe { exact_div(diff, size) }
-            }
-
-            #[inline(always)]
-            fn is_empty(&self) -> bool {
-                self.ptr == self.end
+                (self.end as usize - self.ptr as usize) / mem::size_of::<$type>()
             }
         }
     };
@@ -178,11 +166,6 @@ impl ExactSizeIterator for StringIterator<'_> {
     fn len(&self) -> usize {
         self.size - self.index
     }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.size == self.index
-    }
 }
 
 impl<'a> Iterator for StringIterator<'a> {
@@ -241,8 +224,6 @@ impl<'a> Iterator for StringIterator<'a> {
 
 impl FusedIterator for StringIterator<'_> {}
 
-unsafe impl TrustedLen for StringIterator<'_> {}
-
 impl<'a> DecimalIterator<'a> {
     #[inline(always)]
     unsafe fn next_unchecked_<T>(&mut self) -> Decimal
@@ -283,18 +264,11 @@ impl<'a> DecimalIterator<'a> {
 impl<'a> ExactSizeIterator for DecimalIterator<'a> {
     #[inline(always)]
     fn len(&self) -> usize {
-        let start = self.ptr;
         let size = match self.nobits {
             NoBits::N32 => mem::size_of::<i32>(),
             NoBits::N64 => mem::size_of::<i64>(),
         };
-        let diff = unsafe { unchecked_sub(self.end as usize, start as usize) };
-        unsafe { exact_div(diff, size) }
-    }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.ptr == self.end
+        (self.end as usize - self.ptr as usize) / size
     }
 }
 
@@ -345,13 +319,7 @@ where
 {
     #[inline(always)]
     fn len(&self) -> usize {
-        let start = self.ptr;
-        unsafe { unchecked_sub(self.end as usize, start as usize) }
-    }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.ptr == self.end
+        self.end as usize - self.ptr as usize
     }
 }
 
@@ -389,17 +357,10 @@ where
 
 impl<'a, I: Iterator> FusedIterator for NullableIterator<'a, I> {}
 
-unsafe impl<'a, I: Iterator> TrustedLen for NullableIterator<'a, I> {}
-
 impl<'a, I: Iterator> ExactSizeIterator for ArrayIterator<'a, I> {
     #[inline(always)]
     fn len(&self) -> usize {
         self.size - self.index
-    }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.size == self.index
     }
 }
 
@@ -444,8 +405,6 @@ impl<'a, I: Iterator> Iterator for ArrayIterator<'a, I> {
 }
 
 impl<'a, I: Iterator> FusedIterator for ArrayIterator<'a, I> {}
-
-unsafe impl<'a, I: Iterator> TrustedLen for ArrayIterator<'a, I> {}
 
 impl<'a> SimpleIterable<'a> for &[u8] {
     type Iter = StringIterator<'a>;
