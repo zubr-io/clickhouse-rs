@@ -3,8 +3,12 @@ use std::{
     io::{self, Cursor},
     pin::Pin,
     ptr,
+    sync::{
+        self,
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{self, Poll},
-    sync::{self, Arc, atomic::{AtomicBool, Ordering}},
 };
 
 use chrono_tz::Tz;
@@ -16,9 +20,8 @@ use pin_project::pin_project;
 use crate::{
     binary::Parser,
     errors::{DriverError, Error, Result},
-    io::read_to_end::read_to_end,
+    pool::{Inner, Pool},
     types::{Block, Cmd, Packet},
-    pool::{Pool, Inner},
 };
 
 /// Line transport
@@ -177,19 +180,21 @@ impl ClickhouseTransport {
             Poll::Pending => Ok(false),
         }
     }
+}
 
-    fn try_parse_msg(mut self: Pin<&mut Self>) -> Poll<Option<io::Result<Packet<()>>>> {
+macro_rules! try_parse_msg {
+    ($this:expr) => {{
         let pos;
-        let ret = {
-            let mut cursor = Cursor::new(&self.rd);
+        let ret: Poll<Option<io::Result<Packet<()>>>> = {
+            let mut cursor = Cursor::new(&*$this.rd);
             let res = {
-                let mut parser = Parser::new(&mut cursor, self.timezone, self.compress);
+                let mut parser = Parser::new(&mut cursor, *$this.timezone, *$this.compress);
                 parser.parse_packet()
             };
             pos = cursor.position() as usize;
 
             if let Ok(Packet::Hello(_, ref packet)) = res {
-                self.timezone = Some(packet.timezone);
+                *$this.timezone = Some(packet.timezone);
             }
 
             match res {
@@ -208,16 +213,16 @@ impl ClickhouseTransport {
             Poll::Pending => (),
             _ => {
                 // Data is consumed
-                let new_len = self.rd.len() - pos;
+                let new_len = $this.rd.len() - pos;
                 unsafe {
-                    ptr::copy(self.rd.as_ptr().add(pos), self.rd.as_mut_ptr(), new_len);
-                    self.rd.set_len(new_len);
+                    ptr::copy($this.rd.as_ptr().add(pos), $this.rd.as_mut_ptr(), new_len);
+                    $this.rd.set_len(new_len);
                 }
             }
         }
 
         ret
-    }
+    }};
 }
 
 impl ClickhouseTransport {
@@ -241,26 +246,64 @@ impl ClickhouseTransport {
     }
 }
 
+struct Guard<'a> {
+    buf: &'a mut Vec<u8>,
+    len: usize,
+}
+
+impl Drop for Guard<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.buf.set_len(self.len);
+        }
+    }
+}
+
 impl Stream for ClickhouseTransport {
     type Item = io::Result<Packet<()>>;
 
     /// Read a message from the `Transport`
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut task::Context) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, mut cx: &mut task::Context) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
         // Check whether our currently buffered data is enough for a packet
         // before reading any more data. This prevents the buffer from growing
         // indefinitely when the sender is faster than we can consume the data
-        if !self.buf_is_incomplete && !self.rd.is_empty() {
-            if let Poll::Ready(ret) = self.as_mut().try_parse_msg()? {
+        if !*this.buf_is_incomplete && !this.rd.is_empty() {
+            if let Poll::Ready(ret) = try_parse_msg!(this)? {
+                // if let Poll::Ready(ret) = self.as_mut().try_parse_msg()? {
                 return Poll::Ready(ret.map(Ok));
             }
         }
 
         // Fill the buffer!
-        while !self.done {
-            let mut this = self.project();
-            match read_to_end(this.inner, cx, &mut this.rd) {
+        while !*this.done {
+            let start_len = this.rd.len();
+            let mut g = Guard {
+                len: start_len,
+                buf: &mut *this.rd,
+            };
+            let ret = loop {
+                if g.len == g.buf.len() {
+                    unsafe {
+                        g.buf.reserve(32);
+                        let capacity = g.buf.capacity();
+                        g.buf.set_len(capacity);
+                    }
+                }
+                match this.inner.as_mut().poll_read(&mut cx, &mut g.buf[g.len..]) {
+                    Poll::Ready(Ok(0)) => {
+                        break Poll::Ready(Ok(g.len - start_len));
+                    }
+                    Poll::Ready(Ok(n)) => {
+                        g.len += n;
+                    }
+                    poll => break poll,
+                }
+            };
+            match ret {
                 Poll::Ready(Ok(0)) => {
-                    self.done = true;
+                    *this.done = true;
                     break;
                 }
                 Poll::Ready(Ok(_)) => {}
@@ -270,9 +313,8 @@ impl Stream for ClickhouseTransport {
         }
 
         // Try to parse the new data!
-        let ret = self.as_mut().try_parse_msg();
-
-        self.buf_is_incomplete = if let Poll::Pending = ret { true } else { false };
+        let ret = try_parse_msg!(this);
+        *this.buf_is_incomplete = if let Poll::Pending = ret { true } else { false };
 
         ret
     }
