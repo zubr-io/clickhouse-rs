@@ -33,7 +33,7 @@ impl dyn ColumnData {
             "Int64" => W::wrap(VectorColumnData::<i64>::load(reader, size)?),
             "Float32" => W::wrap(VectorColumnData::<f32>::load(reader, size)?),
             "Float64" => W::wrap(VectorColumnData::<f64>::load(reader, size)?),
-            "String" => W::wrap(StringColumnData::load(reader, size)?),
+            "String" | "Blob" => W::wrap(StringColumnData::load(reader, size)?),
             "Date" => W::wrap(DateColumnData::<u16>::load(reader, size, tz)?),
             "DateTime" => W::wrap(DateColumnData::<u32>::load(reader, size, tz)?),
             _ => {
