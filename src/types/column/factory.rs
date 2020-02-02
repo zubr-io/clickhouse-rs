@@ -13,6 +13,22 @@ use crate::{
     SqlType,
 };
 
+macro_rules! match_str {
+    ($arg:ident, {
+        $( $($var:literal)|* => $doit:expr,)*
+        _ => $dothat:block
+    }) => {
+        $(
+            $(
+                if $arg.eq_ignore_ascii_case($var) {
+                    $doit
+                } else
+            )*
+        )*
+        $dothat
+    }
+}
+
 const DEFAULT_CAPACITY: usize = 100;
 
 impl dyn ColumnData {
@@ -22,20 +38,20 @@ impl dyn ColumnData {
         size: usize,
         tz: Tz,
     ) -> Result<W::Wrapper> {
-        Ok(match type_name {
+        Ok(match_str!(type_name, {
             "UInt8" => W::wrap(VectorColumnData::<u8>::load(reader, size)?),
             "UInt16" => W::wrap(VectorColumnData::<u16>::load(reader, size)?),
             "UInt32" => W::wrap(VectorColumnData::<u32>::load(reader, size)?),
             "UInt64" => W::wrap(VectorColumnData::<u64>::load(reader, size)?),
-            "Int8" => W::wrap(VectorColumnData::<i8>::load(reader, size)?),
-            "Int16" => W::wrap(VectorColumnData::<i16>::load(reader, size)?),
-            "Int32" => W::wrap(VectorColumnData::<i32>::load(reader, size)?),
-            "Int64" => W::wrap(VectorColumnData::<i64>::load(reader, size)?),
-            "Float32" => W::wrap(VectorColumnData::<f32>::load(reader, size)?),
-            "Float64" => W::wrap(VectorColumnData::<f64>::load(reader, size)?),
-            "String" => W::wrap(StringColumnData::load(reader, size)?),
+            "Int8" | "TinyInt" => W::wrap(VectorColumnData::<i8>::load(reader, size)?),
+            "Int16" | "SmallInt" => W::wrap(VectorColumnData::<i16>::load(reader, size)?),
+            "Int32" | "Int" | "Integer" => W::wrap(VectorColumnData::<i32>::load(reader, size)?),
+            "Int64" | "BigInt" => W::wrap(VectorColumnData::<i64>::load(reader, size)?),
+            "Float32" | "Float" => W::wrap(VectorColumnData::<f32>::load(reader, size)?),
+            "Float64" | "Double" => W::wrap(VectorColumnData::<f64>::load(reader, size)?),
+            "String" | "Char" | "Varchar" | "Text" | "TinyText" | "MediumText" | "LongText" | "Blob" | "TinyBlob" | "MediumBlob" | "LongBlob" => W::wrap(StringColumnData::load(reader, size)?),
             "Date" => W::wrap(DateColumnData::<u16>::load(reader, size, tz)?),
-            "DateTime" => W::wrap(DateColumnData::<u32>::load(reader, size, tz)?),
+            "DateTime" | "Timestamp" => W::wrap(DateColumnData::<u32>::load(reader, size, tz)?),
             _ => {
                 if let Some(inner_type) = parse_nullable_type(type_name) {
                     W::wrap(NullableColumnData::load(reader, inner_type, size, tz)?)
@@ -52,7 +68,7 @@ impl dyn ColumnData {
                     return Err(message.into());
                 }
             }
-        })
+        }))
     }
 
     pub(crate) fn from_type<W: ColumnWrapper>(
